@@ -690,6 +690,20 @@ app.get('/api/files/:subjectId/:filename', (req, res) => {
             
             if (fs.existsSync(altPath1)) {
                 console.log('Found file in root uploads, serving from:', altPath1);
+                
+                // Move file to correct location for future requests
+                try {
+                    const correctPath = path.join(uploadsDir, subjectId);
+                    if (!fs.existsSync(correctPath)) {
+                        fs.mkdirSync(correctPath, { recursive: true });
+                    }
+                    const newFilePath = path.join(correctPath, filename);
+                    fs.copyFileSync(altPath1, newFilePath);
+                    console.log('Copied file to correct location:', newFilePath);
+                } catch (moveError) {
+                    console.error('Error moving file:', moveError);
+                }
+                
                 const ext = path.extname(filename).toLowerCase();
                 let contentType = 'application/octet-stream';
                 if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
@@ -699,12 +713,27 @@ app.get('/api/files/:subjectId/:filename', (req, res) => {
                 
                 res.set('Content-Type', contentType);
                 res.set('Access-Control-Allow-Origin', '*');
+                res.set('Cache-Control', 'public, max-age=31536000');
                 res.sendFile(path.resolve(altPath1));
+            } else if (fs.existsSync(altPath2)) {
+                console.log('Found file in temp directory, serving from:', altPath2);
+                const ext = path.extname(filename).toLowerCase();
+                let contentType = 'application/octet-stream';
+                if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
+                else if (ext === '.png') contentType = 'image/png';
+                else if (ext === '.gif') contentType = 'image/gif';
+                else if (ext === '.pdf') contentType = 'application/pdf';
+                
+                res.set('Content-Type', contentType);
+                res.set('Access-Control-Allow-Origin', '*');
+                res.sendFile(path.resolve(altPath2));
             } else {
                 res.status(404).json({ 
-                    message: 'File not found',
+                    message: 'File not found in any location',
                     requestedPath: filePath,
-                    alternativePaths: [altPath1, altPath2]
+                    alternativePaths: [altPath1, altPath2],
+                    subjectId: subjectId,
+                    filename: filename
                 });
             }
         }

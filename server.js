@@ -28,15 +28,23 @@ if (!fs.existsSync(uploadsDir)) {
 // Configure multer for file uploads
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        const uploadPath = path.join(uploadsDir, req.params.subjectId || 'temp');
+        // Extract subjectId from the request URL
+        const subjectId = req.params.subjectId || req.body.subjectId || 'temp';
+        const uploadPath = path.join(uploadsDir, subjectId);
+        
+        console.log('Creating upload path:', uploadPath);
+        
         if (!fs.existsSync(uploadPath)) {
             fs.mkdirSync(uploadPath, { recursive: true });
+            console.log('Created directory:', uploadPath);
         }
         cb(null, uploadPath);
     },
     filename: function (req, file, cb) {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, uniqueSuffix + path.extname(file.originalname));
+        const filename = uniqueSuffix + path.extname(file.originalname);
+        console.log('Generated filename:', filename);
+        cb(null, filename);
     }
 });
 
@@ -638,35 +646,71 @@ app.post('/api/subjects/:subjectId/chapters/:chapterId/upload', authenticateToke
 // Serve uploaded files
 app.get('/api/files/:subjectId/:filename', (req, res) => {
     try {
-        const filePath = path.join(uploadsDir, req.params.subjectId, req.params.filename);
-        console.log('Serving file:', filePath);
+        const { subjectId, filename } = req.params;
+        const filePath = path.join(uploadsDir, subjectId, filename);
+        
+        console.log('File request:', { subjectId, filename });
+        console.log('Looking for file at:', filePath);
+        console.log('File exists:', fs.existsSync(filePath));
         
         if (fs.existsSync(filePath)) {
             // Set proper headers for images
-            const ext = path.extname(req.params.filename).toLowerCase();
+            const ext = path.extname(filename).toLowerCase();
+            let contentType = 'application/octet-stream';
+            
             if (ext === '.jpg' || ext === '.jpeg') {
-                res.set('Content-Type', 'image/jpeg');
+                contentType = 'image/jpeg';
             } else if (ext === '.png') {
-                res.set('Content-Type', 'image/png');
+                contentType = 'image/png';
             } else if (ext === '.gif') {
-                res.set('Content-Type', 'image/gif');
+                contentType = 'image/gif';
             } else if (ext === '.pdf') {
-                res.set('Content-Type', 'application/pdf');
+                contentType = 'application/pdf';
             }
             
-            // Set CORS headers for file access
+            console.log('Serving file with content type:', contentType);
+            
+            // Set headers
+            res.set('Content-Type', contentType);
             res.set('Access-Control-Allow-Origin', '*');
             res.set('Access-Control-Allow-Methods', 'GET');
             res.set('Access-Control-Allow-Headers', 'Content-Type');
+            res.set('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
             
             res.sendFile(path.resolve(filePath));
         } else {
-            console.log('File not found:', filePath);
-            res.status(404).json({ message: 'File not found' });
+            console.log('File not found at:', filePath);
+            
+            // Try alternative locations
+            const altPath1 = path.join(uploadsDir, filename); // Root uploads directory
+            const altPath2 = path.join(uploadsDir, 'temp', filename); // Temp directory
+            
+            console.log('Trying alternative path 1:', altPath1, 'exists:', fs.existsSync(altPath1));
+            console.log('Trying alternative path 2:', altPath2, 'exists:', fs.existsSync(altPath2));
+            
+            if (fs.existsSync(altPath1)) {
+                console.log('Found file in root uploads, serving from:', altPath1);
+                const ext = path.extname(filename).toLowerCase();
+                let contentType = 'application/octet-stream';
+                if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
+                else if (ext === '.png') contentType = 'image/png';
+                else if (ext === '.gif') contentType = 'image/gif';
+                else if (ext === '.pdf') contentType = 'application/pdf';
+                
+                res.set('Content-Type', contentType);
+                res.set('Access-Control-Allow-Origin', '*');
+                res.sendFile(path.resolve(altPath1));
+            } else {
+                res.status(404).json({ 
+                    message: 'File not found',
+                    requestedPath: filePath,
+                    alternativePaths: [altPath1, altPath2]
+                });
+            }
         }
     } catch (error) {
         console.error('Error serving file:', error);
-        res.status(500).json({ message: 'Server error' });
+        res.status(500).json({ message: 'Server error: ' + error.message });
     }
 });
 
@@ -790,6 +834,68 @@ app.get('/api/health', (req, res) => {
         message: 'ES1 Class API Server is running',
         timestamp: new Date().toISOString()
     });
+});
+
+// Debug endpoint to check file structure
+app.get('/api/debug/files', (req, res) => {
+    try {
+        const uploadsDirContents = fs.readdirSync(uploadsDir, { withFileTypes: true });
+        const fileStructure = {};
+        
+        uploadsDirContents.forEach(item => {
+            if (item.isDirectory()) {
+                const subjectDir = path.join(uploadsDir, item.name);
+                try {
+                    fileStructure[item.name] = fs.readdirSync(subjectDir);
+                } catch (err) {
+                    fileStructure[item.name] = 'Error reading directory';
+                }
+            } else {
+                if (!fileStructure['root_files']) fileStructure['root_files'] = [];
+                fileStructure['root_files'].push(item.name);
+            }
+        });
+        
+        res.json({
+            uploadsDir: uploadsDir,
+            fileStructure: fileStructure,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Alternative file serving endpoint for root uploads
+app.get('/api/file/:filename', (req, res) => {
+    try {
+        const filename = req.params.filename;
+        const filePath = path.join(uploadsDir, filename);
+        
+        console.log('Alternative file request:', filename);
+        console.log('Looking at path:', filePath);
+        
+        if (fs.existsSync(filePath)) {
+            const ext = path.extname(filename).toLowerCase();
+            let contentType = 'application/octet-stream';
+            
+            if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
+            else if (ext === '.png') contentType = 'image/png';
+            else if (ext === '.gif') contentType = 'image/gif';
+            else if (ext === '.pdf') contentType = 'application/pdf';
+            
+            res.set('Content-Type', contentType);
+            res.set('Access-Control-Allow-Origin', '*');
+            res.set('Cache-Control', 'public, max-age=31536000');
+            
+            res.sendFile(path.resolve(filePath));
+        } else {
+            res.status(404).json({ message: 'File not found', path: filePath });
+        }
+    } catch (error) {
+        console.error('Alternative file serving error:', error);
+        res.status(500).json({ message: 'Server error: ' + error.message });
+    }
 });
 
 // Handle 404 for API routes
@@ -951,10 +1057,69 @@ async function sendBackupToDiscord(backupPath, eventType, eventData) {
     }
 }
 
+// Migration function to fix file structure
+async function migrateFileStructure() {
+    try {
+        console.log('Checking file structure migration...');
+        
+        // Get all subjects with files
+        const subjects = await Subject.find({
+            $or: [
+                { 'chapters.images': { $exists: true, $not: { $size: 0 } } },
+                { 'chapters.pdfs': { $exists: true, $not: { $size: 0 } } }
+            ]
+        });
+        
+        for (const subject of subjects) {
+            const subjectDir = path.join(uploadsDir, subject._id.toString());
+            
+            // Create subject directory if it doesn't exist
+            if (!fs.existsSync(subjectDir)) {
+                fs.mkdirSync(subjectDir, { recursive: true });
+                console.log('Created subject directory:', subjectDir);
+            }
+            
+            // Check for files in wrong location and move them
+            for (const chapter of subject.chapters) {
+                // Check images
+                if (chapter.images) {
+                    for (const image of chapter.images) {
+                        const wrongPath = path.join(uploadsDir, image.filename);
+                        const correctPath = path.join(subjectDir, image.filename);
+                        
+                        if (fs.existsSync(wrongPath) && !fs.existsSync(correctPath)) {
+                            fs.renameSync(wrongPath, correctPath);
+                            console.log(`Moved image: ${image.filename} to correct location`);
+                        }
+                    }
+                }
+                
+                // Check PDFs
+                if (chapter.pdfs) {
+                    for (const pdf of chapter.pdfs) {
+                        const wrongPath = path.join(uploadsDir, pdf.filename);
+                        const correctPath = path.join(subjectDir, pdf.filename);
+                        
+                        if (fs.existsSync(wrongPath) && !fs.existsSync(correctPath)) {
+                            fs.renameSync(wrongPath, correctPath);
+                            console.log(`Moved PDF: ${pdf.filename} to correct location`);
+                        }
+                    }
+                }
+            }
+        }
+        
+        console.log('File structure migration completed');
+    } catch (error) {
+        console.error('Error during file migration:', error);
+    }
+}
+
 // Initialize database and start server
 const startServer = async () => {
     await initializeAdmin();
     await initializeSubjects();
+    await migrateFileStructure();
     
     const server = app.listen(PORT, '0.0.0.0', () => {
         console.log('🚀 ES1 Class API Server Started!');

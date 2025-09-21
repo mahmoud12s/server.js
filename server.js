@@ -895,32 +895,148 @@ app.get('/api/debug/files', (req, res) => {
     }
 });
 
+// Search and serve file by original name
+app.get('/api/search-file/:originalname', async (req, res) => {
+    try {
+        const originalname = req.params.originalname;
+        console.log('Searching for file by original name:', originalname);
+        
+        // Search in database for file with this original name
+        const subjects = await Subject.find({
+            $or: [
+                { 'chapters.images.originalname': originalname },
+                { 'chapters.pdfs.originalname': originalname }
+            ]
+        });
+        
+        let foundFile = null;
+        let foundSubjectId = null;
+        
+        for (const subject of subjects) {
+            for (const chapter of subject.chapters) {
+                // Check images
+                const imageFile = chapter.images?.find(img => img.originalname === originalname);
+                if (imageFile) {
+                    foundFile = imageFile;
+                    foundSubjectId = subject._id;
+                    break;
+                }
+                
+                // Check PDFs
+                const pdfFile = chapter.pdfs?.find(pdf => pdf.originalname === originalname);
+                if (pdfFile) {
+                    foundFile = pdfFile;
+                    foundSubjectId = subject._id;
+                    break;
+                }
+            }
+            if (foundFile) break;
+        }
+        
+        if (foundFile) {
+            console.log('Found file in database:', foundFile);
+            
+            // Try to serve the file from multiple locations
+            const possiblePaths = [
+                path.join(uploadsDir, foundSubjectId.toString(), foundFile.filename),
+                path.join(uploadsDir, foundFile.filename),
+                path.join(uploadsDir, foundSubjectId.toString(), originalname),
+                path.join(uploadsDir, originalname)
+            ];
+            
+            for (const filePath of possiblePaths) {
+                if (fs.existsSync(filePath)) {
+                    console.log('Serving file from:', filePath);
+                    
+                    const ext = path.extname(originalname).toLowerCase();
+                    let contentType = 'application/octet-stream';
+                    if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
+                    else if (ext === '.png') contentType = 'image/png';
+                    else if (ext === '.gif') contentType = 'image/gif';
+                    else if (ext === '.pdf') contentType = 'application/pdf';
+                    
+                    res.set('Content-Type', contentType);
+                    res.set('Access-Control-Allow-Origin', '*');
+                    res.set('Cache-Control', 'public, max-age=31536000');
+                    
+                    return res.sendFile(path.resolve(filePath));
+                }
+            }
+            
+            res.status(404).json({ 
+                message: 'File found in database but not on disk',
+                originalname: originalname,
+                filename: foundFile.filename,
+                searchedPaths: possiblePaths
+            });
+        } else {
+            res.status(404).json({ 
+                message: 'File not found in database',
+                originalname: originalname
+            });
+        }
+        
+    } catch (error) {
+        console.error('Search file error:', error);
+        res.status(500).json({ message: 'Server error: ' + error.message });
+    }
+});
+
 // Alternative file serving endpoint for root uploads
 app.get('/api/file/:filename', (req, res) => {
     try {
         const filename = req.params.filename;
-        const filePath = path.join(uploadsDir, filename);
+        
+        // Try multiple possible locations
+        const possiblePaths = [
+            path.join(uploadsDir, filename), // Root uploads
+            path.join(uploadsDir, 'temp', filename), // Temp directory
+        ];
+        
+        // Also check all subject directories
+        try {
+            const subdirs = fs.readdirSync(uploadsDir, { withFileTypes: true })
+                .filter(dirent => dirent.isDirectory())
+                .map(dirent => dirent.name);
+            
+            subdirs.forEach(subdir => {
+                possiblePaths.push(path.join(uploadsDir, subdir, filename));
+            });
+        } catch (err) {
+            console.log('Error reading subdirectories:', err);
+        }
         
         console.log('Alternative file request:', filename);
-        console.log('Looking at path:', filePath);
+        console.log('Searching in paths:', possiblePaths);
         
-        if (fs.existsSync(filePath)) {
-            const ext = path.extname(filename).toLowerCase();
-            let contentType = 'application/octet-stream';
-            
-            if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
-            else if (ext === '.png') contentType = 'image/png';
-            else if (ext === '.gif') contentType = 'image/gif';
-            else if (ext === '.pdf') contentType = 'application/pdf';
-            
-            res.set('Content-Type', contentType);
-            res.set('Access-Control-Allow-Origin', '*');
-            res.set('Cache-Control', 'public, max-age=31536000');
-            
-            res.sendFile(path.resolve(filePath));
-        } else {
-            res.status(404).json({ message: 'File not found', path: filePath });
+        // Try each path until we find the file
+        for (const filePath of possiblePaths) {
+            if (fs.existsSync(filePath)) {
+                console.log('Found file at:', filePath);
+                
+                const ext = path.extname(filename).toLowerCase();
+                let contentType = 'application/octet-stream';
+                
+                if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
+                else if (ext === '.png') contentType = 'image/png';
+                else if (ext === '.gif') contentType = 'image/gif';
+                else if (ext === '.pdf') contentType = 'application/pdf';
+                
+                res.set('Content-Type', contentType);
+                res.set('Access-Control-Allow-Origin', '*');
+                res.set('Cache-Control', 'public, max-age=31536000');
+                
+                return res.sendFile(path.resolve(filePath));
+            }
         }
+        
+        // If file not found anywhere
+        res.status(404).json({ 
+            message: 'File not found in any location', 
+            filename: filename,
+            searchedPaths: possiblePaths
+        });
+        
     } catch (error) {
         console.error('Alternative file serving error:', error);
         res.status(500).json({ message: 'Server error: ' + error.message });

@@ -471,14 +471,24 @@ app.delete('/api/subjects/:id', authenticateToken, requireRole(['admin']), async
     }
 });
 
-app.get('/api/subjects/:name', async (req, res) => {
+app.get('/api/subjects/:id', async (req, res) => {
     try {
-        const subject = await Subject.findOne({ name: new RegExp(req.params.name, 'i') });
+        // Try to find by ID first, then by name for backward compatibility
+        let subject;
+        if (req.params.id.match(/^[0-9a-fA-F]{24}$/)) {
+            // Valid ObjectId
+            subject = await Subject.findById(req.params.id);
+        } else {
+            // Treat as name
+            subject = await Subject.findOne({ name: new RegExp(req.params.id, 'i') });
+        }
+        
         if (!subject) {
             return res.status(404).json({ message: 'Subject not found' });
         }
         res.json(subject);
     } catch (error) {
+        console.error('Get subject error:', error);
         res.status(500).json({ message: 'Server error' });
     }
 });
@@ -538,7 +548,7 @@ app.delete('/api/subjects/:subjectId/chapters/:chapterId', authenticateToken, re
             }
         });
 
-        subject.chapters.id(req.params.chapterId).remove();
+        subject.chapters.pull({ _id: req.params.chapterId });
         await subject.save();
         
         // Trigger backup for chapter deletion
@@ -850,6 +860,11 @@ async function createBackup(eventType, eventData = {}) {
 
 async function sendBackupToDiscord(backupPath, eventType, eventData) {
     try {
+        if (!DISCORD_WEBHOOK_URL) {
+            console.log('No Discord webhook configured, skipping Discord upload');
+            return;
+        }
+
         const stats = fs.statSync(backupPath);
         const fileSizeInMB = (stats.size / (1024 * 1024)).toFixed(2);
         
@@ -859,6 +874,8 @@ async function sendBackupToDiscord(backupPath, eventType, eventData) {
             return;
         }
 
+        // Use a simpler approach without form-data dependency
+        const FormData = require('form-data');
         const formData = new FormData();
         formData.append('file', fs.createReadStream(backupPath));
         
@@ -904,6 +921,7 @@ async function sendBackupToDiscord(backupPath, eventType, eventData) {
         console.log('Backup sent to Discord successfully');
     } catch (error) {
         console.error('Error sending backup to Discord:', error.message);
+        // Don't fail the main operation if backup fails
     }
 }
 
@@ -941,4 +959,3 @@ const startServer = async () => {
 };
 
 startServer();
-

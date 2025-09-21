@@ -3,7 +3,11 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
-// const path = require('path'); // Not needed for API-only server
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const archiver = require('archiver');
+const axios = require('axios');
 
 // Load environment variables
 require('dotenv').config();
@@ -13,6 +17,46 @@ const PORT = process.env.PORT || 2092;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-here';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://3alehawhaw:7HZybRRtsEm4Sge3@cluster0.tbima.mongodb.net/';
 const SERVER_DOMAIN = process.env.SERVER_DOMAIN || 'earth.bssr-nodes.com';
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
+
+// Create uploads directory if it doesn't exist
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        const uploadPath = path.join(uploadsDir, req.params.subjectId || 'temp');
+        if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+        }
+        cb(null, uploadPath);
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+const fileFilter = (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|pdf/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (extname && mimetype) {
+        return cb(null, true);
+    } else {
+        cb(new Error('Only images (JPEG, JPG, PNG, GIF) and PDF files are allowed'));
+    }
+};
+
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+    fileFilter: fileFilter
+});
 
 // Middleware
 app.use(cors({
@@ -43,6 +87,7 @@ const userSchema = new mongoose.Schema({
     password: { type: String, required: true },
     role: { type: String, enum: ['admin', 'teacher', 'student'], default: 'student' },
     permissions: [{ type: String }],
+    canCreateAdmin: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
 });
 
@@ -66,6 +111,23 @@ const subjectSchema = new mongoose.Schema({
         description: String,
         lessons: Number,
         duration: String,
+        images: [{
+            filename: String,
+            originalname: String,
+            path: String,
+            mimetype: String,
+            size: Number,
+            uploadedAt: { type: Date, default: Date.now },
+            uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+        }],
+        pdfs: [{
+            filename: String,
+            originalname: String,
+            path: String,
+            size: Number,
+            uploadedAt: { type: Date, default: Date.now },
+            uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+        }],
         createdAt: { type: Date, default: Date.now }
     }],
     createdAt: { type: Date, default: Date.now }
@@ -133,17 +195,21 @@ const initializeAdmin = async () => {
             console.log('No userId index to drop');
         }
 
-        const adminExists = await User.findOne({ username: 'admin' });
+        // Remove old admin if exists
+        await User.deleteOne({ username: 'admin' });
+        
+        const adminExists = await User.findOne({ username: 'mahmoud' });
         if (!adminExists) {
-            const hashedPassword = await bcrypt.hash('admin123', 10);
+            const hashedPassword = await bcrypt.hash('mahmoudontop', 10);
             const admin = new User({
-                username: 'admin',
+                username: 'mahmoud',
                 password: hashedPassword,
                 role: 'admin',
-                permissions: ['all']
+                permissions: ['all'],
+                canCreateAdmin: true
             });
             await admin.save();
-            console.log('Default admin user created');
+            console.log('Main admin user created: mahmoud');
         }
 
         const teacherExists = await User.findOne({ username: 'teacher' });
@@ -153,10 +219,11 @@ const initializeAdmin = async () => {
                 username: 'teacher',
                 password: hashedPassword,
                 role: 'teacher',
-                permissions: ['schedule', 'content', 'homework']
+                permissions: ['pdf_upload'], // Teachers can only upload PDFs
+                canCreateAdmin: false
             });
             await teacher.save();
-            console.log('Default teacher user created');
+            console.log('Default teacher user created (PDF upload only)');
         }
     } catch (error) {
         console.error('Error initializing users:', error);
@@ -257,6 +324,14 @@ app.post('/api/users', authenticateToken, requireRole(['admin']), async (req, re
     try {
         const { username, password, role, permissions } = req.body;
         
+        // Check if trying to create admin
+        if (role === 'admin') {
+            const currentUser = await User.findById(req.user.userId);
+            if (!currentUser.canCreateAdmin) {
+                return res.status(403).json({ message: 'You do not have permission to create admin users' });
+            }
+        }
+        
         const existingUser = await User.findOne({ username });
         if (existingUser) {
             return res.status(400).json({ message: 'User already exists' });
@@ -267,10 +342,15 @@ app.post('/api/users', authenticateToken, requireRole(['admin']), async (req, re
             username,
             password: hashedPassword,
             role,
-            permissions: permissions || []
+            permissions: permissions || [],
+            canCreateAdmin: role === 'admin' ? false : undefined // New admins cannot create other admins by default
         });
 
         await user.save();
+        
+        // Trigger backup for new user creation
+        await createBackup('user_created', { username, role });
+        
         res.status(201).json({ message: 'User created successfully', userId: user._id });
     } catch (error) {
         console.error('Create user error:', error);
@@ -364,6 +444,10 @@ app.post('/api/subjects', authenticateToken, requireRole(['admin', 'teacher']), 
 
         await subject.save();
         console.log('Subject created successfully:', subject);
+        
+        // Trigger backup for new subject
+        await createBackup('subject_created', { subjectName: subject.name, createdBy: req.user.username });
+        
         res.status(201).json({ message: 'Subject created successfully', subject });
     } catch (error) {
         console.error('Create subject error:', error);
@@ -416,6 +500,14 @@ app.post('/api/subjects/:subjectId/chapters', authenticateToken, requireRole(['a
         });
 
         await subject.save();
+        
+        // Trigger backup for new chapter
+        await createBackup('chapter_created', { 
+            subjectName: subject.name, 
+            chapterTitle: title,
+            createdBy: req.user.username 
+        });
+        
         res.status(201).json({ message: 'Chapter added successfully', subject });
     } catch (error) {
         console.error('Add chapter error:', error);
@@ -430,11 +522,168 @@ app.delete('/api/subjects/:subjectId/chapters/:chapterId', authenticateToken, re
             return res.status(404).json({ message: 'Subject not found' });
         }
 
+        const chapter = subject.chapters.id(req.params.chapterId);
+        if (!chapter) {
+            return res.status(404).json({ message: 'Chapter not found' });
+        }
+
+        // Delete associated files
+        [...chapter.images, ...chapter.pdfs].forEach(file => {
+            try {
+                if (fs.existsSync(file.path)) {
+                    fs.unlinkSync(file.path);
+                }
+            } catch (err) {
+                console.error('Error deleting file:', err);
+            }
+        });
+
         subject.chapters.id(req.params.chapterId).remove();
         await subject.save();
+        
+        // Trigger backup for chapter deletion
+        await createBackup('chapter_deleted', { subjectName: subject.name, chapterTitle: chapter.title });
+        
         res.json({ message: 'Chapter deleted successfully' });
     } catch (error) {
         console.error('Delete chapter error:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// File upload endpoints
+app.post('/api/subjects/:subjectId/chapters/:chapterId/upload', authenticateToken, requireRole(['admin', 'teacher']), upload.array('files', 10), async (req, res) => {
+    try {
+        const { subjectId, chapterId } = req.params;
+        const subject = await Subject.findById(subjectId);
+        
+        if (!subject) {
+            return res.status(404).json({ message: 'Subject not found' });
+        }
+
+        const chapter = subject.chapters.id(chapterId);
+        if (!chapter) {
+            return res.status(404).json({ message: 'Chapter not found' });
+        }
+
+        const user = await User.findById(req.user.userId);
+        
+        // Check teacher permissions
+        if (user.role === 'teacher') {
+            const hasOnlyPdfs = req.files.every(file => file.mimetype === 'application/pdf');
+            if (!hasOnlyPdfs) {
+                // Delete uploaded files if teacher tried to upload non-PDF
+                req.files.forEach(file => {
+                    try {
+                        fs.unlinkSync(file.path);
+                    } catch (err) {
+                        console.error('Error deleting file:', err);
+                    }
+                });
+                return res.status(403).json({ message: 'Teachers can only upload PDF files' });
+            }
+        }
+
+        const uploadedFiles = req.files.map(file => ({
+            filename: file.filename,
+            originalname: file.originalname,
+            path: file.path,
+            mimetype: file.mimetype,
+            size: file.size,
+            uploadedBy: req.user.userId,
+            uploadedAt: new Date()
+        }));
+
+        // Separate images and PDFs
+        uploadedFiles.forEach(file => {
+            if (file.mimetype.startsWith('image/')) {
+                chapter.images.push(file);
+            } else if (file.mimetype === 'application/pdf') {
+                chapter.pdfs.push(file);
+            }
+        });
+
+        await subject.save();
+        
+        // Trigger backup for file uploads
+        await createBackup('files_uploaded', { 
+            subjectName: subject.name, 
+            chapterTitle: chapter.title, 
+            fileCount: uploadedFiles.length,
+            uploadedBy: user.username
+        });
+
+        res.json({ 
+            message: 'Files uploaded successfully', 
+            uploadedCount: uploadedFiles.length,
+            chapter: chapter
+        });
+    } catch (error) {
+        console.error('File upload error:', error);
+        res.status(500).json({ message: 'Server error: ' + error.message });
+    }
+});
+
+// Serve uploaded files
+app.get('/api/files/:subjectId/:filename', (req, res) => {
+    const filePath = path.join(uploadsDir, req.params.subjectId, req.params.filename);
+    if (fs.existsSync(filePath)) {
+        res.sendFile(filePath);
+    } else {
+        res.status(404).json({ message: 'File not found' });
+    }
+});
+
+// Delete specific file from chapter
+app.delete('/api/subjects/:subjectId/chapters/:chapterId/files/:fileId', authenticateToken, requireRole(['admin']), async (req, res) => {
+    try {
+        const { subjectId, chapterId, fileId } = req.params;
+        const subject = await Subject.findById(subjectId);
+        
+        if (!subject) {
+            return res.status(404).json({ message: 'Subject not found' });
+        }
+
+        const chapter = subject.chapters.id(chapterId);
+        if (!chapter) {
+            return res.status(404).json({ message: 'Chapter not found' });
+        }
+
+        // Find and remove file from images or pdfs array
+        let fileFound = false;
+        let filePath = '';
+        
+        const imageIndex = chapter.images.findIndex(img => img._id.toString() === fileId);
+        if (imageIndex !== -1) {
+            filePath = chapter.images[imageIndex].path;
+            chapter.images.splice(imageIndex, 1);
+            fileFound = true;
+        } else {
+            const pdfIndex = chapter.pdfs.findIndex(pdf => pdf._id.toString() === fileId);
+            if (pdfIndex !== -1) {
+                filePath = chapter.pdfs[pdfIndex].path;
+                chapter.pdfs.splice(pdfIndex, 1);
+                fileFound = true;
+            }
+        }
+
+        if (!fileFound) {
+            return res.status(404).json({ message: 'File not found' });
+        }
+
+        // Delete physical file
+        try {
+            if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+            }
+        } catch (err) {
+            console.error('Error deleting physical file:', err);
+        }
+
+        await subject.save();
+        res.json({ message: 'File deleted successfully' });
+    } catch (error) {
+        console.error('Delete file error:', error);
         res.status(500).json({ message: 'Server error' });
     }
 });
@@ -517,6 +766,147 @@ app.use('*', (req, res) => {
     res.status(404).json({ message: 'API server - Frontend should be hosted separately' });
 });
 
+// Backup System Functions
+async function createBackup(eventType, eventData = {}) {
+    try {
+        if (!DISCORD_WEBHOOK_URL) {
+            console.log('No Discord webhook URL configured, skipping backup');
+            return;
+        }
+
+        const timestamp = new Date().toISOString();
+        const backupDir = path.join(__dirname, 'backups');
+        
+        if (!fs.existsSync(backupDir)) {
+            fs.mkdirSync(backupDir, { recursive: true });
+        }
+
+        const backupFileName = `backup-${eventType}-${Date.now()}.zip`;
+        const backupPath = path.join(backupDir, backupFileName);
+
+        // Create ZIP file
+        const output = fs.createWriteStream(backupPath);
+        const archive = archiver('zip', { zlib: { level: 9 } });
+
+        output.on('close', async () => {
+            console.log(`Backup created: ${backupFileName} (${archive.pointer()} bytes)`);
+            
+            // Send to Discord webhook
+            await sendBackupToDiscord(backupPath, eventType, eventData);
+            
+            // Clean up local backup file after sending
+            try {
+                fs.unlinkSync(backupPath);
+            } catch (err) {
+                console.error('Error cleaning up backup file:', err);
+            }
+        });
+
+        archive.on('error', (err) => {
+            console.error('Backup archive error:', err);
+        });
+
+        archive.pipe(output);
+
+        // Add database data
+        try {
+            const users = await User.find({}, '-password').lean();
+            const subjects = await Subject.find().lean();
+            const schedule = await Schedule.find().lean();
+            const homework = await Homework.find().lean();
+
+            const dbData = {
+                timestamp,
+                eventType,
+                eventData,
+                data: {
+                    users,
+                    subjects,
+                    schedule,
+                    homework
+                }
+            };
+
+            archive.append(JSON.stringify(dbData, null, 2), { name: 'database_backup.json' });
+        } catch (dbError) {
+            console.error('Error backing up database:', dbError);
+        }
+
+        // Add uploaded files
+        try {
+            if (fs.existsSync(uploadsDir)) {
+                archive.directory(uploadsDir, 'uploads');
+            }
+        } catch (fileError) {
+            console.error('Error backing up files:', fileError);
+        }
+
+        archive.finalize();
+
+    } catch (error) {
+        console.error('Backup creation error:', error);
+    }
+}
+
+async function sendBackupToDiscord(backupPath, eventType, eventData) {
+    try {
+        const stats = fs.statSync(backupPath);
+        const fileSizeInMB = (stats.size / (1024 * 1024)).toFixed(2);
+        
+        // Discord has a 8MB file limit for webhooks
+        if (stats.size > 8 * 1024 * 1024) {
+            console.log('Backup file too large for Discord webhook, skipping upload');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', fs.createReadStream(backupPath));
+        
+        const embedData = {
+            embeds: [{
+                title: '📦 ES1 Class - Backup Created',
+                description: `Backup triggered by: **${eventType}**`,
+                color: 0x00ff00,
+                fields: [
+                    {
+                        name: 'File Size',
+                        value: `${fileSizeInMB} MB`,
+                        inline: true
+                    },
+                    {
+                        name: 'Timestamp',
+                        value: new Date().toLocaleString(),
+                        inline: true
+                    }
+                ],
+                footer: {
+                    text: 'ES1 Class Management System'
+                }
+            }]
+        };
+
+        if (Object.keys(eventData).length > 0) {
+            embedData.embeds[0].fields.push({
+                name: 'Event Details',
+                value: JSON.stringify(eventData, null, 2).substring(0, 1000),
+                inline: false
+            });
+        }
+
+        formData.append('payload_json', JSON.stringify(embedData));
+
+        await axios.post(DISCORD_WEBHOOK_URL, formData, {
+            headers: {
+                ...formData.getHeaders()
+            }
+        });
+
+        console.log('Backup sent to Discord successfully');
+    } catch (error) {
+        console.error('Error sending backup to Discord:', error.message);
+    }
+}
+
 // Initialize database and start server
 const startServer = async () => {
     await initializeAdmin();
@@ -530,8 +920,8 @@ const startServer = async () => {
         console.log(`🏠 Local access: http://localhost:${PORT}`);
         console.log('========================================');
         console.log('🔐 Default Credentials:');
-        console.log('   Admin: admin / admin123');
-        console.log('   Teacher: teacher / teacher123');
+        console.log('   Main Admin: mahmoud / mahmoudontop');
+        console.log('   Teacher: teacher / teacher123 (PDF upload only)');
         console.log('========================================');
         console.log('📋 API Endpoints:');
         console.log(`   Health: http://${SERVER_DOMAIN}:${PORT}/api/health`);

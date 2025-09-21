@@ -81,8 +81,50 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Serve static uploads directory
-app.use('/api/uploads', express.static(uploadsDir));
+// Serve static uploads directory with proper headers
+app.use('/api/uploads', express.static(uploadsDir, {
+    setHeaders: (res, path, stat) => {
+        const ext = path.split('.').pop().toLowerCase();
+        if (ext === 'pdf') {
+            res.set('Content-Type', 'application/pdf');
+        } else if (['jpg', 'jpeg', 'png', 'gif'].includes(ext)) {
+            res.set('Content-Type', `image/${ext === 'jpg' ? 'jpeg' : ext}`);
+        }
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Methods', 'GET');
+        res.set('Cache-Control', 'public, max-age=31536000');
+    }
+}));
+
+// Also serve uploads at root level for Railway compatibility
+app.use('/uploads', express.static(uploadsDir, {
+    setHeaders: (res, path, stat) => {
+        const ext = path.split('.').pop().toLowerCase();
+        if (ext === 'pdf') {
+            res.set('Content-Type', 'application/pdf');
+        } else if (['jpg', 'jpeg', 'png', 'gif'].includes(ext)) {
+            res.set('Content-Type', `image/${ext === 'jpg' ? 'jpeg' : ext}`);
+        }
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Methods', 'GET');
+        res.set('Cache-Control', 'public, max-age=31536000');
+    }
+}));
+
+// Additional static serving for Railway hosting compatibility
+app.use('/static/uploads', express.static(uploadsDir, {
+    setHeaders: (res, path, stat) => {
+        const ext = path.split('.').pop().toLowerCase();
+        if (ext === 'pdf') {
+            res.set('Content-Type', 'application/pdf');
+        } else if (['jpg', 'jpeg', 'png', 'gif'].includes(ext)) {
+            res.set('Content-Type', `image/${ext === 'jpg' ? 'jpeg' : ext}`);
+        }
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Methods', 'GET');
+        res.set('Cache-Control', 'public, max-age=31536000');
+    }
+}));
 
 // Connect to MongoDB
 mongoose.connect(MONGODB_URI, {
@@ -417,6 +459,19 @@ app.delete('/api/schedule/:id', authenticateToken, requireRole(['admin', 'teache
     }
 });
 
+// Clean up Friday entries (utility endpoint)
+app.delete('/api/schedule/cleanup/friday', authenticateToken, requireRole(['admin']), async (req, res) => {
+    try {
+        const result = await Schedule.deleteMany({ day: { $regex: /^friday$/i } });
+        res.json({ 
+            message: `Deleted ${result.deletedCount} Friday schedule entries`,
+            deletedCount: result.deletedCount 
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
 // Subject management
 app.get('/api/subjects', async (req, res) => {
     try {
@@ -681,61 +736,61 @@ app.get('/api/files/:subjectId/:filename', (req, res) => {
         } else {
             console.log('File not found at:', filePath);
             
-            // Try alternative locations
-            const altPath1 = path.join(uploadsDir, filename); // Root uploads directory
-            const altPath2 = path.join(uploadsDir, 'temp', filename); // Temp directory
+            // Try alternative locations - comprehensive search
+            const alternativePaths = [
+                path.join(uploadsDir, filename), // Root uploads directory
+                path.join(uploadsDir, 'temp', filename) // Temp directory
+            ];
             
-            console.log('Trying alternative path 1:', altPath1, 'exists:', fs.existsSync(altPath1));
-            console.log('Trying alternative path 2:', altPath2, 'exists:', fs.existsSync(altPath2));
-            
-            if (fs.existsSync(altPath1)) {
-                console.log('Found file in root uploads, serving from:', altPath1);
+            // Search all subdirectories for the file
+            try {
+                const subdirs = fs.readdirSync(uploadsDir, { withFileTypes: true })
+                    .filter(dirent => dirent.isDirectory())
+                    .map(dirent => dirent.name);
                 
-                // Move file to correct location for future requests
-                try {
-                    const correctPath = path.join(uploadsDir, subjectId);
-                    if (!fs.existsSync(correctPath)) {
-                        fs.mkdirSync(correctPath, { recursive: true });
-                    }
-                    const newFilePath = path.join(correctPath, filename);
-                    fs.copyFileSync(altPath1, newFilePath);
-                    console.log('Copied file to correct location:', newFilePath);
-                } catch (moveError) {
-                    console.error('Error moving file:', moveError);
-                }
-                
-                const ext = path.extname(filename).toLowerCase();
-                let contentType = 'application/octet-stream';
-                if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
-                else if (ext === '.png') contentType = 'image/png';
-                else if (ext === '.gif') contentType = 'image/gif';
-                else if (ext === '.pdf') contentType = 'application/pdf';
-                
-                res.set('Content-Type', contentType);
-                res.set('Access-Control-Allow-Origin', '*');
-                res.set('Cache-Control', 'public, max-age=31536000');
-                res.sendFile(path.resolve(altPath1));
-            } else if (fs.existsSync(altPath2)) {
-                console.log('Found file in temp directory, serving from:', altPath2);
-                const ext = path.extname(filename).toLowerCase();
-                let contentType = 'application/octet-stream';
-                if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
-                else if (ext === '.png') contentType = 'image/png';
-                else if (ext === '.gif') contentType = 'image/gif';
-                else if (ext === '.pdf') contentType = 'application/pdf';
-                
-                res.set('Content-Type', contentType);
-                res.set('Access-Control-Allow-Origin', '*');
-                res.sendFile(path.resolve(altPath2));
-            } else {
-                res.status(404).json({ 
-                    message: 'File not found in any location',
-                    requestedPath: filePath,
-                    alternativePaths: [altPath1, altPath2],
-                    subjectId: subjectId,
-                    filename: filename
+                subdirs.forEach(subdir => {
+                    alternativePaths.push(path.join(uploadsDir, subdir, filename));
                 });
+            } catch (err) {
+                console.log('Error reading subdirectories:', err);
             }
+            
+            console.log('Trying alternative paths:', alternativePaths);
+            
+            // Try each path until we find the file
+            for (const altPath of alternativePaths) {
+                console.log('Checking:', altPath, 'exists:', fs.existsSync(altPath));
+                
+                if (fs.existsSync(altPath)) {
+                    console.log('Found file at:', altPath);
+                    
+                    // Set proper content type
+                    const ext = path.extname(filename).toLowerCase();
+                    let contentType = 'application/octet-stream';
+                    if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
+                    else if (ext === '.png') contentType = 'image/png';
+                    else if (ext === '.gif') contentType = 'image/gif';
+                    else if (ext === '.pdf') contentType = 'application/pdf';
+                    
+                    res.set('Content-Type', contentType);
+                    res.set('Access-Control-Allow-Origin', '*');
+                    res.set('Access-Control-Allow-Methods', 'GET');
+                    res.set('Access-Control-Allow-Headers', 'Content-Type');
+                    res.set('Cache-Control', 'public, max-age=31536000');
+                    
+                    return res.sendFile(path.resolve(altPath));
+                }
+            }
+            
+            // File not found anywhere
+            res.status(404).json({ 
+                message: 'File not found in any location',
+                requestedPath: filePath,
+                alternativePaths: alternativePaths,
+                subjectId: subjectId,
+                filename: filename,
+                uploadsDir: uploadsDir
+            });
         }
     } catch (error) {
         console.error('Error serving file:', error);
@@ -835,6 +890,56 @@ app.delete('/api/homework/:id', authenticateToken, requireRole(['admin', 'teache
     } catch (error) {
         res.status(500).json({ message: 'Server error' });
     }
+});
+
+// Debug endpoint to check file structure
+app.get('/api/debug/files', (req, res) => {
+    try {
+        const fileStructure = {};
+        
+        // Read uploads directory structure
+        if (fs.existsSync(uploadsDir)) {
+            const items = fs.readdirSync(uploadsDir, { withFileTypes: true });
+            
+            items.forEach(item => {
+                if (item.isDirectory()) {
+                    const dirPath = path.join(uploadsDir, item.name);
+                    try {
+                        const files = fs.readdirSync(dirPath);
+                        fileStructure[item.name] = files;
+                    } catch (err) {
+                        fileStructure[item.name] = `Error reading directory: ${err.message}`;
+                    }
+                } else {
+                    if (!fileStructure['_root_files']) {
+                        fileStructure['_root_files'] = [];
+                    }
+                    fileStructure['_root_files'].push(item.name);
+                }
+            });
+        }
+        
+        res.json({
+            uploadsDir: uploadsDir,
+            fileStructure: fileStructure,
+            environment: process.env.NODE_ENV || 'development',
+            platform: process.platform
+        });
+    } catch (error) {
+        res.status(500).json({ 
+            error: error.message,
+            uploadsDir: uploadsDir 
+        });
+    }
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+    res.json({ 
+        status: 'OK', 
+        timestamp: new Date().toISOString(),
+        uploadsDir: uploadsDir
+    });
 });
 
 // Dashboard stats
@@ -979,6 +1084,73 @@ app.get('/api/search-file/:originalname', async (req, res) => {
     } catch (error) {
         console.error('Search file error:', error);
         res.status(500).json({ message: 'Server error: ' + error.message });
+    }
+});
+
+// Railway hosting fallback endpoint
+app.get('/api/railway-file/:subjectId/:filename', (req, res) => {
+    try {
+        const { subjectId, filename } = req.params;
+        
+        console.log('Railway fallback request:', { subjectId, filename });
+        
+        // For Railway, try absolute paths and relative paths
+        const possiblePaths = [
+            path.join(process.cwd(), 'uploads', subjectId, filename),
+            path.join(process.cwd(), 'backend', 'uploads', subjectId, filename),
+            path.join(__dirname, 'uploads', subjectId, filename),
+            path.join(uploadsDir, subjectId, filename),
+            path.join(uploadsDir, filename),
+        ];
+        
+        // Also check all subdirectories
+        try {
+            const subdirs = fs.readdirSync(uploadsDir, { withFileTypes: true })
+                .filter(dirent => dirent.isDirectory())
+                .map(dirent => dirent.name);
+            
+            subdirs.forEach(subdir => {
+                possiblePaths.push(path.join(uploadsDir, subdir, filename));
+            });
+        } catch (err) {
+            console.log('Error reading subdirectories:', err);
+        }
+        
+        console.log('Railway searching paths:', possiblePaths);
+        
+        for (const filePath of possiblePaths) {
+            console.log('Railway checking:', filePath, 'exists:', fs.existsSync(filePath));
+            
+            if (fs.existsSync(filePath)) {
+                console.log('Railway found file at:', filePath);
+                
+                const ext = path.extname(filename).toLowerCase();
+                let contentType = 'application/octet-stream';
+                
+                if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
+                else if (ext === '.png') contentType = 'image/png';
+                else if (ext === '.gif') contentType = 'image/gif';
+                else if (ext === '.pdf') contentType = 'application/pdf';
+                
+                res.set('Content-Type', contentType);
+                res.set('Access-Control-Allow-Origin', '*');
+                res.set('Cache-Control', 'public, max-age=31536000');
+                
+                return res.sendFile(path.resolve(filePath));
+            }
+        }
+        
+        res.status(404).json({ 
+            message: 'Railway: File not found in any location',
+            searchedPaths: possiblePaths,
+            cwd: process.cwd(),
+            __dirname: __dirname,
+            uploadsDir: uploadsDir
+        });
+        
+    } catch (error) {
+        console.error('Railway file serving error:', error);
+        res.status(500).json({ message: 'Railway file serving error: ' + error.message });
     }
 });
 

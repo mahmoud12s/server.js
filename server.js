@@ -67,19 +67,47 @@ const upload = multer({
 });
 
 // Middleware
-app.use(cors({
-    origin: process.env.FRONTEND_URL || [
+// Enhanced CORS configuration with debugging
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    console.log('🔧 CORS Request from origin:', origin);
+    
+    const allowedOrigins = process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(',') : [
         'http://localhost:3000', 
         'http://localhost:5000', 
+        'https://l-o-des1b.thteam.me',
+        'https://l-o-des1b.thteam.me/',
         'https://lodes1b.thteam.me',
         'https://lodes1b.thteam.me/',
         'https://chimerical-travesseiro-eb586c.netlify.app',
         'https://euphonious-gingersnap-65d3e4.netlify.app'
-    ],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-}));
+    ];
+    
+    console.log('🔧 Allowed origins:', allowedOrigins);
+    console.log('🔧 Origin allowed:', allowedOrigins.includes(origin));
+    
+    // Set CORS headers
+    if (allowedOrigins.includes(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+    } else {
+        // For development/testing - allow all origins (remove in production if needed)
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        console.log('🔧 Using wildcard CORS for origin:', origin);
+    }
+    
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    
+    // Handle preflight requests
+    if (req.method === 'OPTIONS') {
+        console.log('🔧 Handling OPTIONS preflight request');
+        res.status(200).end();
+        return;
+    }
+    
+    next();
+});
 app.use(express.json());
 
 // Serve static uploads directory with proper headers

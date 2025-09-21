@@ -17,7 +17,7 @@ const PORT = process.env.PORT || 2092;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-here';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://3alehawhaw:7HZybRRtsEm4Sge3@cluster0.tbima.mongodb.net/';
 const SERVER_DOMAIN = process.env.SERVER_DOMAIN || 'earth.bssr-nodes.com';
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || 'https://discord.com/api/webhooks/1419271989889339392/YBs0zI2JvaDJ0AEYMtQJdkoEAQg4IGVyIs6BbR90COZL2FbJG5kro62g6SxwRI4Mppy1';
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -941,3 +941,4 @@ const startServer = async () => {
 };
 
 startServer();
+

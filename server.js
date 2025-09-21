@@ -71,7 +71,7 @@ app.use(cors({
     origin: process.env.FRONTEND_URL || [
         'http://localhost:3000', 
         'http://localhost:5000', 
-        'http://127.0.0.1:5500',
+        'https://lodes1b.thteam.me',
         'https://chimerical-travesseiro-eb586c.netlify.app',
         'https://euphonious-gingersnap-65d3e4.netlify.app'
     ],

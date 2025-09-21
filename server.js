@@ -109,8 +109,6 @@ const subjectSchema = new mongoose.Schema({
     chapters: [{
         title: String,
         description: String,
-        lessons: Number,
-        duration: String,
         images: [{
             filename: String,
             originalname: String,
@@ -495,7 +493,7 @@ app.get('/api/subjects/:id', async (req, res) => {
 
 app.post('/api/subjects/:subjectId/chapters', authenticateToken, requireRole(['admin', 'teacher']), async (req, res) => {
     try {
-        const { title, description, lessons, duration } = req.body;
+        const { title, description } = req.body;
         
         const subject = await Subject.findById(req.params.subjectId);
         if (!subject) {
@@ -505,8 +503,8 @@ app.post('/api/subjects/:subjectId/chapters', authenticateToken, requireRole(['a
         subject.chapters.push({
             title,
             description,
-            lessons: parseInt(lessons),
-            duration
+            images: [],
+            pdfs: []
         });
 
         await subject.save();

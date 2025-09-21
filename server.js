@@ -73,6 +73,9 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// Serve static uploads directory
+app.use('/api/uploads', express.static(uploadsDir));
+
 // Connect to MongoDB
 mongoose.connect(MONGODB_URI, {
     useNewUrlParser: true,
@@ -634,11 +637,36 @@ app.post('/api/subjects/:subjectId/chapters/:chapterId/upload', authenticateToke
 
 // Serve uploaded files
 app.get('/api/files/:subjectId/:filename', (req, res) => {
-    const filePath = path.join(uploadsDir, req.params.subjectId, req.params.filename);
-    if (fs.existsSync(filePath)) {
-        res.sendFile(filePath);
-    } else {
-        res.status(404).json({ message: 'File not found' });
+    try {
+        const filePath = path.join(uploadsDir, req.params.subjectId, req.params.filename);
+        console.log('Serving file:', filePath);
+        
+        if (fs.existsSync(filePath)) {
+            // Set proper headers for images
+            const ext = path.extname(req.params.filename).toLowerCase();
+            if (ext === '.jpg' || ext === '.jpeg') {
+                res.set('Content-Type', 'image/jpeg');
+            } else if (ext === '.png') {
+                res.set('Content-Type', 'image/png');
+            } else if (ext === '.gif') {
+                res.set('Content-Type', 'image/gif');
+            } else if (ext === '.pdf') {
+                res.set('Content-Type', 'application/pdf');
+            }
+            
+            // Set CORS headers for file access
+            res.set('Access-Control-Allow-Origin', '*');
+            res.set('Access-Control-Allow-Methods', 'GET');
+            res.set('Access-Control-Allow-Headers', 'Content-Type');
+            
+            res.sendFile(path.resolve(filePath));
+        } else {
+            console.log('File not found:', filePath);
+            res.status(404).json({ message: 'File not found' });
+        }
+    } catch (error) {
+        console.error('Error serving file:', error);
+        res.status(500).json({ message: 'Server error' });
     }
 });
 
